@@ -1,171 +1,94 @@
 ---
 name: ziqx-drive-sdk
-description: SDK for Ziqx Drive providing client-side file upload and server-side signed URL generation.
+description: Integrate @ziqx/drive in JavaScript or TypeScript apps for server-side upload and delete signing, browser uploads, and optional image resizing. Use for Ziqx Drive credentials and stored-file handling, not direct S3/R2 access.
 ---
 
-# @ziqx/drive Skill
+# Ziqx Drive SDK
 
-This skill provides comprehensive instructions on how to use the `@ziqx/drive` package for managing file uploads to Ziqx Drive. It handles both server-side signed URL generation and client-side direct uploads.
+Install `@ziqx/drive`. Obtain the drive key and secret from **Ziqx Developers → app → Drive**. Keep both on the server; the browser receives only a signed upload URL. Use the app's existing authorization checks when exposing signing or deletion operations.
 
-## Overview
+## Choose the API
 
-`@ziqx/drive` is split into two main components:
+| API | Environment | Result |
+| --- | --- | --- |
+| `new ZDrive(driveKey, driveSecret, options?)` | Server | Configures Drive credentials and API/core hosts. |
+| `drive.generatePutUrl(fileName, folder?)` | Server | `Promise<SignUrlResponse>` with a signed upload URL. |
+| `drive.generateDeleteUrl(fileName, folder?)` | Server | `Promise<SignUrlResponse>` with a signed deletion URL. |
+| `drive.deleteFile(fileName, folder?)` | Server | Performs the deletion and returns `Promise<UploadResponse>`; can throw. |
+| `new ZDriveClient()` | Browser | Configures credential-free upload helpers. |
+| `client.uploadFile(uploadUrl, file)` | Browser | Uploads with multipart/form-data; returns `Promise<UploadResponse>`. |
+| `client.resizeImage(file, maxWidth?, quality?)` | Browser | Returns `Promise<File>` using Canvas; can throw. |
 
-1. **`ZDrive` (Server-side)**: Used to securely generate signed upload URLs using your Drive credentials.
-2. **`ZDriveClient` (Client-side)**: Used in the browser to upload files directly to the signed URLs and perform image processing (like resizing) before upload.
+`SignUrlResponse` is `{ success: boolean, message: string, url?: string }`. `UploadResponse` is `{ success: boolean, message: string, filename?: string, driveid?: string }`. Check `success` and the required optional field before proceeding. Signing and uploading return normalized failure objects, including for network failures; `deleteFile()` and `resizeImage()` can throw and need the caller's error handling.
 
----
+## Sign on the server
 
-## Installation
-
-```bash
-npm install @ziqx/drive
-```
-
----
-
-## Technical Implementation
-
-### 1. Server-side: Generating Signed URLs
-
-To allow a client to upload a file directly to Ziqx Drive, you must first generate a signed URL on your server. This prevents exposing your `ZDRIVE_SECRET` to the client.
-
-#### API Reference: `ZDrive`
-
-- `constructor(driveKey: string, driveSecret: string)`
-- `generatePutUrl(fileName: string, folder?: string): Promise<SignUrlResponse>`
-- `deleteFile(fileName: string, folder?: string): Promise<any>`
-
-#### Logic Flow
-
-1. Initialize `ZDrive` with your credentials.
-2. Call `generatePutUrl` with the intended filename.
-3. Return the `url` to the client.
-
----
-
-### 2. Client-side: Uploading Files
-
-The client uses the signed URL to perform a `multipart/form-data` POST request directly to Ziqx Drive.
-
-#### API Reference: `ZDriveClient`
-
-- `uploadFile(uploadUrl: string, file: File): Promise<UploadResponse>`
-- `resizeImage(file: File, maxWidth?: number, quality?: number): Promise<File>` (Browser only)
-
-#### Logic Flow
-
-1. Obtain the signed URL from your server.
-2. (Optional) Resize the image using `ZDriveClient.resizeImage`.
-3. Call `uploadFile` with the signed URL and the `File` object.
-
----
-
-## Next.js Implementation Guide
-
-This is the recommended pattern for Next.js applications using Server Actions.
-
-### A. Server Action (`actions/drive.ts`)
-
-Create a server action to securely generate the signed URL.
-
-```typescript
-"use server";
-
-import { ENV } from "@/constants/envs";
+```ts
 import { ZDrive } from "@ziqx/drive";
 
-/**
- * Generates a signed upload URL for Ziqx Drive.
- * This should ALWAYS be called from the server to protect credentials.
- */
-export async function generateSignedUrl(fileName: string, folder?: string) {
-  // Initialize with drive credentials from environment variables
-  const drive = new ZDrive(ENV.ZDRIVE_KEY!, ENV.ZDRIVE_SECRET!);
+const drive = new ZDrive(
+  process.env.ZDRIVE_KEY!,
+  process.env.ZDRIVE_SECRET!,
+);
 
+export async function signUpload(fileName: string, folder?: string) {
+  // Call after the app has authorized this user's upload and target folder.
   const signed = await drive.generatePutUrl(fileName, folder);
-
-  if (signed.success && signed.url) {
-    return signed.url;
-  } else {
-    console.error("❌ Error generating URL:", signed.message);
-    return null;
-  }
+  if (!signed.success || !signed.url) throw new Error(signed.message);
+  return signed.url;
 }
 
-/**
- * Deletes a file from Ziqx Drive.
- */
-export async function deleteFromDrive(fileName: string, folder?: string) {
-  const drive = new ZDrive(ENV.ZDRIVE_KEY!, ENV.ZDRIVE_SECRET!);
-  return await drive.deleteFile(fileName, folder);
+export async function deleteUpload(storedFilename: string) {
+  // Look up and authorize the stored file before allowing its deletion.
+  const result = await drive.deleteFile(storedFilename);
+  if (!result.success) throw new Error(result.message);
+  return result;
 }
 ```
 
-### B. Client Component Usage
+Expose these operations through the app's existing server routes or actions. Never instantiate `ZDrive` or send Drive credentials in client code. In Next.js, a Server Action belongs in a file with `"use server"`; the browser helper belongs in client code.
 
-Use `ZDriveClient` in your frontend components to handle the actual upload process.
+## Upload in the browser
 
-```typescript
-"use client";
-
+```ts
 import { ZDriveClient } from "@ziqx/drive";
-import { generateSignedUrl } from "@/actions/drive";
 
-// ... inside your component
-
-const handleUpload = async (options: any) => {
-  const { file, onSuccess, onError } = options;
+export async function uploadFile(file: File, signedUrl: string) {
   const client = new ZDriveClient();
-
-  try {
-    // 1. Get signed URL from the server action
-    const signedUrl = await generateSignedUrl(file.name);
-    if (!signedUrl) throw new Error("Failed to get signed URL");
-
-    // 2. Upload to Ziqx Drive directly from the browser
-    const uploadRes = await client.uploadFile(signedUrl, file);
-
-    if (!uploadRes.success || !uploadRes.filename) {
-      throw new Error("Upload to ZDrive failed");
-    }
-
-    // 3. Handle success
-    onSuccess(uploadRes.filename);
-  } catch (err) {
-    console.error("Upload Error:", err);
-    onError(new Error("Upload failed"));
+  const uploaded = await client.uploadFile(signedUrl, file);
+  if (!uploaded.success || !uploaded.filename) {
+    throw new Error(uploaded.message);
   }
-};
+  return uploaded.filename; // Save this exact stored name for later deletion.
+}
 ```
 
----
+Get `signedUrl` from your server first, then pass the actual `File` to `uploadFile()`. The helper constructs `FormData` and posts directly to the signed URL; do not build a JSON upload body or manually set the multipart boundary.
 
-## Best Practices for AI Agents
+When resizing is appropriate, `await client.resizeImage(file, 1024, 0.8)` returns a new file. The current helper outputs JPEG, so consider transparency and format requirements before using it. Sign using the file you actually intend to upload.
 
-1.  **Always use Environment Variables**: Never hardcode `driveKey` or `driveSecret`. Ensure they are stored in `.env` and accessed via `process.env` or a config constants file.
-2.  **Server vs Client separation**: Remind the developer that `ZDrive` is for server-side (Node.js/Server Actions/API Routes) and `ZDriveClient` is for client-side (Browser). `ZDriveClient` uses browser-native `FormData` and `fetch`.
-3.  **File Naming**: When generating a signed URL, ensure the filename passed to `generatePutUrl` matches or is appropriate for the file being uploaded.
-4.  **Error Handling**: Always check for `signed.success` on the server and `uploadRes.success` on the client.
-5.  **Image Optimization**: If the user is uploading images, suggest using `client.resizeImage(file, 1024, 0.8)` before calling `uploadFile` to save bandwidth and storage.
-6.  **Folder Organization**: Encourage using the `folder` parameter to organize files (e.g., `users/123/avatars`) for better storage management.
+## Stored names and deletion
 
----
+Upload signing cleans filenames with the exported `cleanUploadName()` helper. Storage also adds a unique suffix. The original name used for signing is therefore not the stored filename.
 
-## Examples
+- Persist the successful upload response's `filename` and use it for deletion.
+- Pass the full relative stored name, such as `users/123/photo-a1b2c3d4.jpg`, or its stored basename plus `folder` as a separate argument.
+- Do not use the original name, a CDN URL, or clean/sanitize an existing stored name before deletion. Delete signing sends the stored name verbatim.
+- Do not supply the folder twice: `deleteFile("users/123/photo-a1b2c3d4.jpg")` and `deleteFile("photo-a1b2c3d4.jpg", "users/123")` target the same file.
 
-#### Simple Client-side Upload Logic
+## Endpoints and local development
 
-```typescript
-const signedUrl = await generateSignedUrl(file.name);
-if (!signedUrl) throw new Error("Failed to get signed URL");
+Uploads are signed with `GET https://api.ziqx.net/v1/drive/sign-url`. On HTTP 401 or 404, the SDK tries core's original signing route once for older drives. Other failures, including rate limits, do not trigger that fallback.
 
-// Upload to Object Storage
-const client = new ZDriveClient();
-const uploadRes = await client.uploadFile(signedUrl, file);
+Deletes are signed with `DELETE https://ziqx.cc/api/drive/sign-url`, then `deleteFile()` sends `DELETE` to the returned signed URL. Signing uses `x-drive-key` and `x-drive-secret` headers, with `filename` and optional `folder` query parameters.
 
-if (!uploadRes.success || !uploadRes.filename)
-  throw new Error("Upload to ZDrive failed");
+```ts
+import { ZDrive } from "@ziqx/drive";
 
-console.log("Uploaded filename:", uploadRes.filename);
+const drive = new ZDrive(process.env.ZDRIVE_KEY!, process.env.ZDRIVE_SECRET!, {
+  apiUrl: "http://127.0.0.1:8080", // Developers API: upload signing
+  coreUrl: "http://localhost:3000", // core-web: delete signing and legacy fallback
+});
 ```
+
+`apiUrl` and `coreUrl` are host overrides, not full signing URLs. For a local setup that supports deletion, configure both hosts rather than pointing all operations at Developers.
